@@ -1,0 +1,22 @@
+{
+  "name": "xcode-mcp-broker",
+  "version": "1.0.0",
+  "description": "A localhost MCP broker for sharing one persistent Xcode mcpbridge connection.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "broker:start": "node xcode-mcp-broker.mjs",
+    "test": "node --test xcode-mcp-broker.test.mjs",
+    "broker:test": "node --test xcode-mcp-broker.test.mjs",
+    "broker:smoke": "node xcode-mcp-broker-smoke.mjs",
+    "service:install": "node install-launch-agent.mjs",
+    "service:uninstall": "node install-launch-agent.mjs --uninstall"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
+  }
+}
