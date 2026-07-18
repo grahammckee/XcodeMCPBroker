@@ -34,21 +34,28 @@ export function runningXcodeProcesses(processList) {
   return processList
     .split("\n")
     .flatMap(line => {
-      const match = line.match(/^\s*(\d+)\s+(.+?\.app\/Contents\/MacOS\/Xcode)(?:\s.*)?$/)
+      const match = line.match(/^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?\.app\/Contents\/MacOS\/Xcode)(?:\s.*)?$/)
       if (!match) return []
-      const appPathEnd = match[2].indexOf(".app/") + 4
-      const appPath = match[2].slice(0, appPathEnd)
+      const startedAt = Date.parse(match[2])
+      if (!Number.isFinite(startedAt)) return []
+      const appPathEnd = match[3].indexOf(".app/") + 4
+      const appPath = match[3].slice(0, appPathEnd)
       return [{
         pid: Number(match[1]),
+        startedAt,
         appPath,
         bridgePath: path.join(appPath, "Contents", "Developer", "usr", "bin", "mcpbridge"),
       }]
     })
-    .sort((left, right) => right.pid - left.pid)
+    .sort((left, right) => right.startedAt - left.startedAt || right.pid - left.pid)
 }
 
 async function runningXcodeBridge() {
-  const { stdout } = await execFileAsync("/bin/ps", ["-axo", "pid=,command="])
+  const { stdout } = await execFileAsync(
+    "/bin/ps",
+    ["-axo", "pid=,lstart=,command="],
+    { env: { ...getDefaultEnvironment(), LC_ALL: "C" } },
+  )
   for (const candidate of runningXcodeProcesses(stdout)) {
     try {
       await access(candidate.bridgePath, constants.X_OK)

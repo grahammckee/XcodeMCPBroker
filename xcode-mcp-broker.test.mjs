@@ -40,19 +40,21 @@ class FakeDownstream {
 
 test("finds the bridge bundled with the newest running Xcode", () => {
   const processes = runningXcodeProcesses(`
-  120 /Applications/Xcode.app/Contents/MacOS/Xcode
-  450 /Applications/Xcode 27.app/Contents/MacOS/Xcode
-  451 /Applications/Xcode 27.app/Contents/SharedFrameworks/Worker
+  900 Fri Jul 17 09:15:00 2026 /Applications/Xcode.app/Contents/MacOS/Xcode
+  100 Sat Jul 18 17:05:00 2026 /Applications/Xcode 27.app/Contents/MacOS/Xcode
+  101 Sat Jul 18 17:05:01 2026 /Applications/Xcode 27.app/Contents/SharedFrameworks/Worker
 `)
 
   assert.deepEqual(processes, [
     {
-      pid: 450,
+      pid: 100,
+      startedAt: Date.parse("Sat Jul 18 17:05:00 2026"),
       appPath: "/Applications/Xcode 27.app",
       bridgePath: "/Applications/Xcode 27.app/Contents/Developer/usr/bin/mcpbridge",
     },
     {
-      pid: 120,
+      pid: 900,
+      startedAt: Date.parse("Fri Jul 17 09:15:00 2026"),
       appPath: "/Applications/Xcode.app",
       bridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
     },
