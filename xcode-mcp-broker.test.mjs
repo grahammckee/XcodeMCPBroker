@@ -4,7 +4,7 @@ import test from "node:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 
-import { startHttpBroker, ToolBroker } from "./xcode-mcp-broker.mjs"
+import { runningXcodeProcesses, startHttpBroker, ToolBroker } from "./xcode-mcp-broker.mjs"
 
 const quietLogger = { error() {} }
 
@@ -37,6 +37,29 @@ class FakeDownstream {
 
   async close() {}
 }
+
+test("finds the bridge bundled with the newest running Xcode", () => {
+  const processes = runningXcodeProcesses(`
+  900 Fri Jul 17 09:15:00 2026 /Applications/Xcode.app/Contents/MacOS/Xcode
+  100 Sat Jul 18 17:05:00 2026 /Applications/Xcode 27.app/Contents/MacOS/Xcode
+  101 Sat Jul 18 17:05:01 2026 /Applications/Xcode 27.app/Contents/SharedFrameworks/Worker
+`)
+
+  assert.deepEqual(processes, [
+    {
+      pid: 100,
+      startedAt: Date.parse("Sat Jul 18 17:05:00 2026"),
+      appPath: "/Applications/Xcode 27.app",
+      bridgePath: "/Applications/Xcode 27.app/Contents/Developer/usr/bin/mcpbridge",
+    },
+    {
+      pid: 900,
+      startedAt: Date.parse("Fri Jul 17 09:15:00 2026"),
+      appPath: "/Applications/Xcode.app",
+      bridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
+    },
+  ])
+})
 
 test("caches the downstream tool list", async () => {
   const downstream = new FakeDownstream()

@@ -1,8 +1,13 @@
+import { execFile } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import { constants } from "node:fs"
+import { access } from "node:fs/promises"
+import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { promisify } from "node:util"
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
@@ -19,9 +24,47 @@ import {
 const defaultHost = "127.0.0.1"
 const defaultPort = 7341
 const defaultRequestTimeout = 10 * 60 * 1000
+const execFileAsync = promisify(execFile)
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+export function runningXcodeProcesses(processList) {
+  return processList
+    .split("\n")
+    .flatMap(line => {
+      const match = line.match(/^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?\.app\/Contents\/MacOS\/Xcode)(?:\s.*)?$/)
+      if (!match) return []
+      const startedAt = Date.parse(match[2])
+      if (!Number.isFinite(startedAt)) return []
+      const appPathEnd = match[3].indexOf(".app/") + 4
+      const appPath = match[3].slice(0, appPathEnd)
+      return [{
+        pid: Number(match[1]),
+        startedAt,
+        appPath,
+        bridgePath: path.join(appPath, "Contents", "Developer", "usr", "bin", "mcpbridge"),
+      }]
+    })
+    .sort((left, right) => right.startedAt - left.startedAt || right.pid - left.pid)
+}
+
+async function runningXcodeBridge() {
+  const { stdout } = await execFileAsync(
+    "/bin/ps",
+    ["-axo", "pid=,lstart=,command="],
+    { env: { ...getDefaultEnvironment(), LC_ALL: "C" } },
+  )
+  for (const candidate of runningXcodeProcesses(stdout)) {
+    try {
+      await access(candidate.bridgePath, constants.X_OK)
+      return candidate
+    } catch {
+      // Try another running Xcode installation.
+    }
+  }
+  return undefined
 }
 
 export class SerialExecutor {
@@ -46,8 +89,8 @@ export class XcodeDownstream {
   #closed = false
 
   constructor({
-    command = process.env.XCODE_MCP_BRIDGE_COMMAND ?? "/usr/bin/xcrun",
-    args = ["mcpbridge"],
+    command = process.env.XCODE_MCP_BRIDGE_COMMAND,
+    args,
     requestTimeout = Number(process.env.XCODE_MCP_REQUEST_TIMEOUT_MS ?? defaultRequestTimeout),
     logger = console,
   } = {}) {
@@ -87,8 +130,9 @@ export class XcodeDownstream {
   }
 
   async #connectOnce(isReconnect) {
+    const serverParameters = await this.#serverParameters()
     const client = new Client({ name: "xcode-mcp-broker", version: "1.0.0" })
-    const transport = new StdioClientTransport({ command: this.command, args: this.args })
+    const transport = new StdioClientTransport(serverParameters)
 
     client.onerror = error => this.logger.error(`[broker] downstream error: ${errorMessage(error)}`)
     client.onclose = () => this.#handleClose(client)
@@ -110,8 +154,33 @@ export class XcodeDownstream {
 
     this.#client = client
     this.#reconnectDelay = 250
-    this.logger.error(`[broker] connected to ${this.command} ${this.args.join(" ")}`)
+    const xcodeTarget = serverParameters.xcodePid ? ` for Xcode PID ${serverParameters.xcodePid}` : ""
+    this.logger.error(`[broker] connected to ${serverParameters.command} ${(serverParameters.args ?? []).join(" ")}${xcodeTarget}`)
     if (isReconnect) this.onReconnected?.()
+  }
+
+  async #serverParameters() {
+    if (this.command) {
+      return {
+        command: this.command,
+        args: this.args ?? (path.basename(this.command) === "xcrun" ? ["mcpbridge"] : []),
+      }
+    }
+
+    const runningXcode = await runningXcodeBridge()
+    if (runningXcode) {
+      return {
+        command: runningXcode.bridgePath,
+        args: [],
+        env: {
+          ...getDefaultEnvironment(),
+          MCP_XCODE_PID: String(runningXcode.pid),
+        },
+        xcodePid: runningXcode.pid,
+      }
+    }
+
+    return { command: "/usr/bin/xcrun", args: ["mcpbridge"] }
   }
 
   #handleClose(client) {

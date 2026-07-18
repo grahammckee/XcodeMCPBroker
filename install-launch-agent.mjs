@@ -52,13 +52,13 @@ async function bootout() {
 
 async function bootstrap() {
   let lastError
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
     try {
       await execFileAsync("/bin/launchctl", ["bootstrap", domain, plistPath])
       return
     } catch (error) {
       lastError = error
-      await new Promise(resolve => setTimeout(resolve, 500))
+      await new Promise(resolve => setTimeout(resolve, 1_000))
     }
   }
   throw lastError

@@ -21,9 +21,11 @@ The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwar
 
 The broker does not hardcode Xcode's tools. It reads `tools/list` from `mcpbridge` and refreshes the cache when the bridge reconnects or Xcode sends a `tools/list_changed` notification. New, removed, or changed tools should therefore be picked up automatically after an Xcode update without requiring a broker release. Connected MCP clients are notified when the cached tool list changes.
 
+When Xcode is running, the broker uses the `mcpbridge` bundled with that application and pins the bridge to its process ID. This keeps beta or side-by-side Xcode installations aligned even when `xcode-select` points to another version. If no Xcode process is available, the broker falls back to `xcrun mcpbridge` while it waits and retries.
+
 This has been tested with the latest Xcode 27 beta available at the time of testing. Future Xcode versions should remain compatible as long as `mcpbridge` continues to implement the standard MCP lifecycle and tool APIs.
 
-If `XCODE_MCP_ALLOWED_TOOLS` is set, newly added tools remain hidden until they are added to that allowlist. `xcrun` also uses the active developer directory, so make sure a newly installed Xcode is selected with `xcode-select` when necessary.
+If `XCODE_MCP_ALLOWED_TOOLS` is set, newly added tools remain hidden until they are added to that allowlist. `XCODE_MCP_BRIDGE_COMMAND` can still override automatic bridge selection when needed.
 
 ## Installation
 
@@ -94,7 +96,7 @@ npm run service:uninstall
 |---|---:|---|
 | `XCODE_MCP_BROKER_HOST` | `127.0.0.1` | HTTP bind address |
 | `XCODE_MCP_BROKER_PORT` | `7341` | HTTP port |
-| `XCODE_MCP_BRIDGE_COMMAND` | `/usr/bin/xcrun` | Bridge executable |
+| `XCODE_MCP_BRIDGE_COMMAND` | automatic | Override the bridge executable; otherwise use the running Xcode's bridge, then fall back to `xcrun mcpbridge` |
 | `XCODE_MCP_ALLOWED_TOOLS` | all tools | Comma-separated tool allowlist |
 | `XCODE_MCP_REQUEST_TIMEOUT_MS` | `600000` | Downstream request timeout |
 | `XCODE_MCP_SESSION_IDLE_TIMEOUT_MS` | `300000` | Idle upstream session timeout |
