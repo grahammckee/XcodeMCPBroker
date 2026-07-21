@@ -219,14 +219,6 @@ export class XcodeDownstream {
     })
   }
 
-  async recycle() {
-    if (this.#closed) return
-    const client = this.#client
-    this.#client = null
-    await client?.close().catch(() => undefined)
-    await this.connect()
-  }
-
   async close() {
     this.#closed = true
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer)
@@ -350,21 +342,11 @@ export class ToolBroker {
     if (!this.#advertisedTools.has(params.name)) {
       throw new McpError(ErrorCode.InvalidParams, `Xcode tool is not advertised or allowed: ${params.name}`)
     }
-    return this.#serial.run(async () => {
-      try {
-        return await this.downstream.callTool(params, options)
-      } catch (error) {
-        const connectionUncertain = options.signal?.aborted
-          || (error instanceof McpError
-            && (error.code === ErrorCode.RequestTimeout || error.code === ErrorCode.ConnectionClosed))
-        if (connectionUncertain && typeof this.downstream.recycle === "function") {
-          await this.downstream.recycle().catch(recycleError => {
-            this.logger.error(`[broker] failed to recycle downstream: ${errorMessage(recycleError)}`)
-          })
-        }
-        throw error
-      }
-    }, options.signal)
+    const { signal, ...downstreamOptions } = options
+    return this.#serial.run(
+      () => this.downstream.callTool(params, downstreamOptions),
+      signal,
+    )
   }
 
   addUpstreamServer(server) {

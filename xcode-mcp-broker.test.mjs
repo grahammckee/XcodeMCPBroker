@@ -3,6 +3,7 @@ import test from "node:test"
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
 
 import { runningXcodeProcesses, startHttpBroker, ToolBroker } from "./xcode-mcp-broker.mjs"
 
@@ -147,44 +148,159 @@ test("filters tools and rejects calls outside the allowlist", async () => {
   )
 })
 
-test("passes progress and cancellation options downstream", async () => {
+test("forwards progress without coupling active work to upstream cancellation", async () => {
   const downstream = new FakeDownstream()
+  let releaseFirstCall
+  const firstCallGate = new Promise(resolve => {
+    releaseFirstCall = resolve
+  })
+  let firstCallStarted
+  const started = new Promise(resolve => {
+    firstCallStarted = resolve
+  })
+  const calls = []
+  downstream.callTool = async (params, options) => {
+    calls.push(params.name)
+    assert.equal(options.signal, undefined)
+    options.onprogress?.({ progress: 1, total: 1 })
+    if (params.name === "FirstTool") {
+      firstCallStarted()
+      await firstCallGate
+    }
+    return { content: [{ type: "text", text: params.name }] }
+  }
   const broker = new ToolBroker(downstream, { logger: quietLogger })
   await broker.start()
   const controller = new AbortController()
   const progress = []
 
-  await broker.callTool(
+  const firstCall = broker.callTool(
     { name: "FirstTool", arguments: {} },
     { signal: controller.signal, onprogress: value => progress.push(value) },
   )
+  await started
+  controller.abort(new Error("cancelled"))
+  const secondCall = broker.callTool({ name: "SecondTool", arguments: {} })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(calls, ["FirstTool"])
+  releaseFirstCall()
+  await Promise.all([firstCall, secondCall])
 
   assert.deepEqual(progress, [{ progress: 1, total: 1 }])
+  assert.deepEqual(calls, ["FirstTool", "SecondTool"])
 })
 
-test("recycles the downstream connection before releasing a cancelled call", async () => {
+test("drops a cancelled queued call without dispatching it downstream", async () => {
   const downstream = new FakeDownstream()
-  downstream.recycleCount = 0
-  downstream.callTool = (_params, options) => new Promise((_resolve, reject) => {
-    options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+  let releaseFirstCall
+  const firstCallGate = new Promise(resolve => {
+    releaseFirstCall = resolve
   })
-  downstream.recycle = async () => {
-    await new Promise(resolve => setTimeout(resolve, 20))
-    downstream.recycleCount += 1
+  const calls = []
+  downstream.callTool = async params => {
+    calls.push(params.name)
+    if (params.name === "FirstTool") await firstCallGate
+    return { content: [{ type: "text", text: params.name }] }
   }
   const broker = new ToolBroker(downstream, { logger: quietLogger })
   await broker.start()
   const controller = new AbortController()
 
-  const call = broker.callTool(
-    { name: "FirstTool", arguments: {} },
+  const firstCall = broker.callTool({ name: "FirstTool", arguments: {} })
+  const cancelledCall = broker.callTool(
+    { name: "SecondTool", arguments: {} },
     { signal: controller.signal },
   )
   await new Promise(resolve => setImmediate(resolve))
   controller.abort(new Error("cancelled"))
+  releaseFirstCall()
 
-  await assert.rejects(call, /cancelled/)
-  assert.equal(downstream.recycleCount, 1)
+  await firstCall
+  await assert.rejects(cancelledCall, /cancelled/)
+  assert.deepEqual(calls, ["FirstTool"])
+})
+
+test("does not replace the downstream connection after a request timeout", async () => {
+  const downstream = new FakeDownstream()
+  downstream.recycleCount = 0
+  downstream.recycle = async () => {
+    downstream.recycleCount += 1
+  }
+  downstream.callTool = async () => {
+    throw new McpError(ErrorCode.RequestTimeout, "Request timed out")
+  }
+  const broker = new ToolBroker(downstream, { logger: quietLogger })
+  await broker.start()
+
+  await assert.rejects(
+    broker.callTool({ name: "FirstTool", arguments: {} }),
+    /Request timed out/,
+  )
+  assert.equal(downstream.recycleCount, 0)
+})
+
+test("keeps one downstream connection when an HTTP client cancels", async () => {
+  const downstream = new FakeDownstream()
+  let releaseFirstCall
+  const firstCallGate = new Promise(resolve => {
+    releaseFirstCall = resolve
+  })
+  let firstCallStarted
+  const started = new Promise(resolve => {
+    firstCallStarted = resolve
+  })
+  const calls = []
+  downstream.callTool = async params => {
+    calls.push(params.name)
+    if (params.name === "FirstTool") {
+      firstCallStarted()
+      await firstCallGate
+    }
+    return { content: [{ type: "text", text: params.name }] }
+  }
+  const broker = new ToolBroker(downstream, { logger: quietLogger })
+  await broker.start()
+  const httpBroker = await startHttpBroker({ broker, port: 0, logger: quietLogger })
+  const address = httpBroker.listener.address()
+  assert(address && typeof address === "object")
+  const url = new URL(`http://127.0.0.1:${address.port}/mcp`)
+  const firstTransport = new StreamableHTTPClientTransport(url)
+  const secondTransport = new StreamableHTTPClientTransport(url)
+  const firstClient = new Client({ name: "first-client", version: "1.0.0" })
+  const secondClient = new Client({ name: "second-client", version: "1.0.0" })
+
+  try {
+    await Promise.all([
+      firstClient.connect(firstTransport),
+      secondClient.connect(secondTransport),
+    ])
+    const controller = new AbortController()
+    const cancelledCall = firstClient.callTool(
+      { name: "FirstTool", arguments: {} },
+      undefined,
+      { signal: controller.signal },
+    )
+    await started
+    const secondCall = secondClient.callTool({ name: "SecondTool", arguments: {} })
+    controller.abort(new Error("cancelled"))
+    await assert.rejects(cancelledCall, /cancelled/)
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepEqual(calls, ["FirstTool"])
+    releaseFirstCall()
+    const result = await secondCall
+    assert.equal(result.content[0].text, "SecondTool")
+    assert.deepEqual(calls, ["FirstTool", "SecondTool"])
+  } finally {
+    releaseFirstCall()
+    await Promise.allSettled([
+      firstTransport.terminateSession(),
+      secondTransport.terminateSession(),
+    ])
+    await Promise.allSettled([firstClient.close(), secondClient.close()])
+    await httpBroker.close()
+  }
 })
 
 test("serves tools through a stateful Streamable HTTP session", async () => {
