@@ -10,7 +10,7 @@ Custom MCP clients ----> localhost broker --> mcpbridge --> Xcode
 Automation scripts ---/
 ```
 
-The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwards progress and cancellation, caches tool discovery, and reconnects when Xcode restarts. It binds to `127.0.0.1` by default.
+The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwards progress, cancels queued work before dispatch, caches tool discovery, and reconnects when Xcode restarts. It binds to `127.0.0.1` by default.
 
 ## Requirements
 
@@ -120,6 +120,8 @@ Issues and pull requests are welcome. For code changes:
 5. Explain the behavior change and verification performed in the pull request.
 
 Downstream calls are intentionally serialized. Changes to concurrency, cancellation, or retry behavior should account for Xcode operations whose outcome may be uncertain after a connection failure.
+
+Cancelling an upstream request prevents it from starting if it is still queued. Once a call has been dispatched, the broker lets it finish on the shared bridge so one client cannot interrupt other clients or trigger another Xcode authorization request.
 
 ## License
 
