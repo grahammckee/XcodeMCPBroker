@@ -7,6 +7,18 @@ const client = new Client({ name: "xcode-mcp-broker-smoke", version: "1.0.0" })
 const transport = new StreamableHTTPClientTransport(url)
 
 try {
+  const brokerDeadline = Date.now() + timeout
+  const healthUrl = new URL("/healthz", url)
+  while (true) {
+    try {
+      await fetch(healthUrl)
+      break
+    } catch (error) {
+      if (Date.now() >= brokerDeadline) throw error
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+  }
+
   await client.connect(transport)
   const deadline = Date.now() + timeout
   let result
