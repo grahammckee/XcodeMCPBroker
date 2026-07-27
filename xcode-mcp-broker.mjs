@@ -23,7 +23,10 @@ import {
 
 const defaultHost = "127.0.0.1"
 const defaultPort = 7341
-const defaultRequestTimeout = 10 * 60 * 1000
+const defaultRequestTimeout = 45 * 1000
+const defaultDiscoveryTimeout = 10 * 1000
+const defaultMaximumRequestDuration = 30 * 60 * 1000
+const defaultXcodeStartupGrace = 5 * 1000
 const execFileAsync = promisify(execFile)
 
 function errorMessage(error) {
@@ -69,11 +72,28 @@ async function runningXcodeBridge() {
 
 export class SerialExecutor {
   #tail = Promise.resolve()
+  #active = false
+  #queued = 0
+
+  get active() {
+    return this.#active
+  }
+
+  get queued() {
+    return this.#queued
+  }
 
   run(operation, signal) {
-    const result = this.#tail.then(() => {
+    this.#queued += 1
+    const result = this.#tail.then(async () => {
+      this.#queued -= 1
       signal?.throwIfAborted()
-      return operation()
+      this.#active = true
+      try {
+        return await operation()
+      } finally {
+        this.#active = false
+      }
     })
     this.#tail = result.catch(() => undefined)
     return result
@@ -87,18 +107,26 @@ export class XcodeDownstream {
   #reconnectDelay = 250
   #hasAttemptedConnection = false
   #closed = false
+  #recycling = null
 
   constructor({
     command = process.env.XCODE_MCP_BRIDGE_COMMAND,
     args,
     requestTimeout = Number(process.env.XCODE_MCP_REQUEST_TIMEOUT_MS ?? defaultRequestTimeout),
+    discoveryTimeout = Number(process.env.XCODE_MCP_DISCOVERY_TIMEOUT_MS ?? defaultDiscoveryTimeout),
+    maximumRequestDuration = Number(process.env.XCODE_MCP_MAX_TOTAL_TIMEOUT_MS ?? defaultMaximumRequestDuration),
+    xcodeStartupGrace = Number(process.env.XCODE_MCP_XCODE_STARTUP_GRACE_MS ?? defaultXcodeStartupGrace),
     logger = console,
   } = {}) {
     this.command = command
     this.args = args
     this.requestTimeout = requestTimeout
+    this.discoveryTimeout = discoveryTimeout
+    this.maximumRequestDuration = maximumRequestDuration
+    this.xcodeStartupGrace = xcodeStartupGrace
     this.logger = logger
     this.onReconnected = undefined
+    this.onDisconnected = undefined
     this.onToolsChanged = undefined
   }
 
@@ -169,6 +197,8 @@ export class XcodeDownstream {
 
     const runningXcode = await runningXcodeBridge()
     if (runningXcode) {
+      const startupDelay = runningXcode.startedAt + this.xcodeStartupGrace - Date.now()
+      if (startupDelay > 0) await new Promise(resolve => setTimeout(resolve, startupDelay))
       return {
         command: runningXcode.bridgePath,
         args: [],
@@ -186,6 +216,7 @@ export class XcodeDownstream {
   #handleClose(client) {
     if (this.#client !== client) return
     this.#client = null
+    this.onDisconnected?.()
     if (this.#closed) return
     this.logger.error("[broker] downstream bridge closed; reconnecting")
     this.#scheduleReconnect()
@@ -207,7 +238,7 @@ export class XcodeDownstream {
 
   async listTools(params) {
     await this.connect()
-    return this.#client.listTools(params, { timeout: this.requestTimeout })
+    return this.#client.listTools(params, { timeout: this.discoveryTimeout })
   }
 
   async callTool(params, options = {}) {
@@ -215,8 +246,27 @@ export class XcodeDownstream {
     return this.#client.callTool(params, CallToolResultSchema, {
       ...options,
       timeout: this.requestTimeout,
+      maxTotalTimeout: this.maximumRequestDuration,
       resetTimeoutOnProgress: true,
     })
+  }
+
+  async recycle() {
+    if (this.#closed) return
+    if (this.#recycling) return this.#recycling
+
+    const client = this.#client
+    this.#client = null
+    this.onDisconnected?.()
+    this.#recycling = (async () => {
+      await client?.close().catch(() => undefined)
+      await this.connect()
+    })()
+    try {
+      await this.#recycling
+    } finally {
+      this.#recycling = null
+    }
   }
 
   async close() {
@@ -238,15 +288,39 @@ export class ToolBroker {
   #refreshing = null
   #refreshPending = false
   #refreshRetryTimer = null
+  #refreshRetryDelay = 1_000
   #initializing = false
   #ready = false
+  #lastFailure = null
+  #activeTool = null
+  #activeSince = null
 
   constructor(downstream, { allowedTools, logger = console } = {}) {
     this.downstream = downstream
     this.allowedTools = allowedTools
     this.logger = logger
-    downstream.onReconnected = () => this.#scheduleRefresh()
+    downstream.onDisconnected = () => this.#markNotReady()
+    downstream.onReconnected = () => {
+      this.#markNotReady()
+      if (!this.#initializing && !this.#refreshing) this.#scheduleRefresh()
+    }
     downstream.onToolsChanged = () => this.#scheduleRefresh()
+  }
+
+  #markNotReady(error) {
+    this.#ready = false
+    this.#cache.clear()
+    this.#advertisedTools.clear()
+    if (error) this.#lastFailure = errorMessage(error)
+  }
+
+  async #recycleAfterFailure(error, context) {
+    this.#markNotReady(error)
+    if (typeof this.downstream.recycle !== "function") return
+    this.logger.error(`[broker] ${context} failed; recycling downstream: ${errorMessage(error)}`)
+    await this.downstream.recycle().catch(recycleError => {
+      this.logger.error(`[broker] failed to recycle downstream: ${errorMessage(recycleError)}`)
+    })
   }
 
   async start() {
@@ -264,10 +338,12 @@ export class ToolBroker {
 
   #scheduleRefreshRetry() {
     if (this.#refreshRetryTimer) return
+    const delay = this.#refreshRetryDelay
+    this.#refreshRetryDelay = Math.min(this.#refreshRetryDelay * 2, 30_000)
     this.#refreshRetryTimer = setTimeout(() => {
       this.#refreshRetryTimer = null
       this.#scheduleRefresh()
-    }, 1_000)
+    }, delay)
     this.#refreshRetryTimer.unref()
   }
 
@@ -304,31 +380,43 @@ export class ToolBroker {
 
   async refreshToolCache() {
     return this.#serial.run(async () => {
-      const cache = new Map()
-      const advertisedTools = new Set()
-      let cursor
+      this.#activeTool = "tools/list"
+      this.#activeSince = Date.now()
+      try {
+        const cache = new Map()
+        const advertisedTools = new Set()
+        let cursor
 
-      do {
-        const result = this.#filterResult(await this.downstream.listTools(cursor ? { cursor } : undefined))
-        cache.set(cursor ?? "", result)
-        for (const tool of result.tools) advertisedTools.add(tool.name)
-        cursor = result.nextCursor
-      } while (cursor)
+        do {
+          const result = this.#filterResult(await this.downstream.listTools(cursor ? { cursor } : undefined))
+          cache.set(cursor ?? "", result)
+          for (const tool of result.tools) advertisedTools.add(tool.name)
+          cursor = result.nextCursor
+        } while (cursor)
 
-      this.#cache = cache
-      this.#advertisedTools = advertisedTools
-      this.#ready = true
-      if (this.#refreshRetryTimer) clearTimeout(this.#refreshRetryTimer)
-      this.#refreshRetryTimer = null
-      this.logger.error(`[broker] cached ${advertisedTools.size} Xcode tools`)
+        this.#cache = cache
+        this.#advertisedTools = advertisedTools
+        this.#ready = true
+        this.#lastFailure = null
+        this.#refreshRetryDelay = 1_000
+        if (this.#refreshRetryTimer) clearTimeout(this.#refreshRetryTimer)
+        this.#refreshRetryTimer = null
+        this.logger.error(`[broker] cached ${advertisedTools.size} Xcode tools`)
+      } catch (error) {
+        await this.#recycleAfterFailure(error, "tool discovery")
+        throw error
+      } finally {
+        this.#activeTool = null
+        this.#activeSince = null
+      }
     })
   }
 
   async listTools(params) {
+    if (this.#initializing || !this.#ready) return { tools: [] }
     const key = params?.cursor ?? ""
     const cached = this.#cache.get(key)
     if (cached) return cached
-    if (this.#initializing || !this.#ready) return { tools: [] }
 
     return this.#serial.run(async () => {
       const result = this.#filterResult(await this.downstream.listTools(params))
@@ -344,7 +432,21 @@ export class ToolBroker {
     }
     const { signal, ...downstreamOptions } = options
     return this.#serial.run(
-      () => this.downstream.callTool(params, downstreamOptions),
+      async () => {
+        this.#activeTool = params.name
+        this.#activeSince = Date.now()
+        try {
+          return await this.downstream.callTool(params, downstreamOptions)
+        } catch (error) {
+          const connectionUncertain = error instanceof McpError
+            && (error.code === ErrorCode.RequestTimeout || error.code === ErrorCode.ConnectionClosed)
+          if (connectionUncertain) await this.#recycleAfterFailure(error, `Xcode tool ${params.name}`)
+          throw error
+        } finally {
+          this.#activeTool = null
+          this.#activeSince = null
+        }
+      },
       signal,
     )
   }
@@ -362,12 +464,19 @@ export class ToolBroker {
   }
 
   health() {
-    const status = !this.downstream.connected ? "degraded" : (this.#ready ? "ok" : "starting")
+    const status = !this.downstream.connected || this.#lastFailure
+      ? "degraded"
+      : (this.#ready ? "ok" : "starting")
     return {
       status,
       downstreamConnected: this.downstream.connected,
       cachedToolCount: this.#advertisedTools.size,
       upstreamSessionCount: this.#upstreamServers.size,
+      queueActive: this.#serial.active,
+      queuedRequestCount: this.#serial.queued,
+      activeTool: this.#activeTool,
+      activeDurationMs: this.#activeSince === null ? null : Date.now() - this.#activeSince,
+      lastFailure: this.#lastFailure,
     }
   }
 

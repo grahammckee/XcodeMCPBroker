@@ -10,7 +10,7 @@ Custom MCP clients ----> localhost broker --> mcpbridge --> Xcode
 Automation scripts ---/
 ```
 
-The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwards progress, cancels queued work before dispatch, caches tool discovery, and reconnects when Xcode restarts. It binds to `127.0.0.1` by default.
+The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwards progress, cancels queued work before dispatch, caches tool discovery, and reconnects when Xcode restarts or its bridge stops responding. It binds to `127.0.0.1` by default.
 
 ## Requirements
 
@@ -98,8 +98,11 @@ npm run service:uninstall
 | `XCODE_MCP_BROKER_PORT` | `7341` | HTTP port |
 | `XCODE_MCP_BRIDGE_COMMAND` | automatic | Override the bridge executable; otherwise use the running Xcode's bridge, then fall back to `xcrun mcpbridge` |
 | `XCODE_MCP_ALLOWED_TOOLS` | all tools | Comma-separated tool allowlist |
-| `XCODE_MCP_REQUEST_TIMEOUT_MS` | `600000` | Downstream request timeout |
+| `XCODE_MCP_DISCOVERY_TIMEOUT_MS` | `10000` | Timeout for Xcode tool discovery before replacing an unresponsive bridge |
+| `XCODE_MCP_REQUEST_TIMEOUT_MS` | `45000` | Downstream no-progress timeout; progress notifications reset it |
+| `XCODE_MCP_MAX_TOTAL_TIMEOUT_MS` | `1800000` | Maximum total duration of a downstream request |
 | `XCODE_MCP_SESSION_IDLE_TIMEOUT_MS` | `300000` | Idle upstream session timeout |
+| `XCODE_MCP_XCODE_STARTUP_GRACE_MS` | `5000` | Delay before connecting to a newly launched Xcode process |
 
 These variables are read directly when running in the foreground. To persist an override in the LaunchAgent, provide it while installing:
 
@@ -121,7 +124,7 @@ Issues and pull requests are welcome. For code changes:
 
 Downstream calls are intentionally serialized. Changes to concurrency, cancellation, or retry behavior should account for Xcode operations whose outcome may be uncertain after a connection failure.
 
-Cancelling an upstream request prevents it from starting if it is still queued. Once a call has been dispatched, the broker lets it finish on the shared bridge so one client cannot interrupt other clients or trigger another Xcode authorization request.
+Cancelling an upstream request prevents it from starting if it is still queued. Once a call has been dispatched, the broker lets it finish on the shared bridge so one client cannot interrupt other clients or trigger another Xcode authorization request. A timeout reported by the broker's own downstream connection is different: the timed-out operation is not retried, but the unresponsive bridge is replaced before later work proceeds.
 
 ## License
 

@@ -119,6 +119,20 @@ test("recovers tool discovery when Xcode becomes available after startup", async
   await broker.close()
 })
 
+test("stops advertising cached tools when Xcode disconnects", async () => {
+  const downstream = new FakeDownstream()
+  const broker = new ToolBroker(downstream, { logger: quietLogger })
+  await broker.start()
+  assert.equal((await broker.listTools()).tools.length, 2)
+
+  downstream.connected = false
+  downstream.onDisconnected()
+
+  assert.deepEqual(await broker.listTools(), { tools: [] })
+  assert.equal(broker.health().cachedToolCount, 0)
+  assert.equal(broker.health().status, "degraded")
+})
+
 test("serializes simultaneous downstream calls", async () => {
   const downstream = new FakeDownstream()
   const broker = new ToolBroker(downstream, { logger: quietLogger })
@@ -221,27 +235,63 @@ test("drops a cancelled queued call without dispatching it downstream", async ()
   assert.deepEqual(calls, ["FirstTool"])
 })
 
-test("does not replace the downstream connection after a request timeout", async () => {
+test("replaces the downstream connection after a request timeout", async () => {
   const downstream = new FakeDownstream()
   downstream.recycleCount = 0
   downstream.recycle = async () => {
     downstream.recycleCount += 1
   }
-  downstream.callTool = async () => {
-    throw new McpError(ErrorCode.RequestTimeout, "Request timed out")
+  let callCount = 0
+  downstream.callTool = async params => {
+    callCount += 1
+    if (callCount === 1) throw new McpError(ErrorCode.RequestTimeout, "Request timed out")
+    return { content: [{ type: "text", text: params.name }] }
   }
   const broker = new ToolBroker(downstream, { logger: quietLogger })
   await broker.start()
 
-  await assert.rejects(
-    broker.callTool({ name: "FirstTool", arguments: {} }),
-    /Request timed out/,
-  )
-  assert.equal(downstream.recycleCount, 0)
+  const timedOutCall = broker.callTool({ name: "FirstTool", arguments: {} })
+  const queuedCall = broker.callTool({ name: "SecondTool", arguments: {} })
+
+  await assert.rejects(timedOutCall, /Request timed out/)
+  assert.equal(downstream.recycleCount, 1)
+
+  const result = await queuedCall
+  assert.equal(result.content[0].text, "SecondTool")
+  assert.equal(downstream.recycleCount, 1)
+})
+
+test("recycles the downstream connection after tool discovery fails", async () => {
+  const downstream = new FakeDownstream()
+  const originalListTools = downstream.listTools.bind(downstream)
+  let discoveryCount = 0
+  downstream.recycleCount = 0
+  downstream.recycle = async () => {
+    downstream.recycleCount += 1
+  }
+  downstream.listTools = async () => {
+    discoveryCount += 1
+    if (discoveryCount === 1) throw new McpError(ErrorCode.RequestTimeout, "Request timed out")
+    return originalListTools()
+  }
+  const broker = new ToolBroker(downstream, { logger: quietLogger })
+
+  await assert.rejects(broker.start(), /Request timed out/)
+  assert.equal(downstream.recycleCount, 1)
+  assert.equal(broker.health().status, "degraded")
+  assert.deepEqual(await broker.listTools(), { tools: [] })
+
+  await broker.refreshToolCache()
+  assert.equal(broker.health().status, "ok")
+  assert.equal((await broker.listTools()).tools.length, 2)
 })
 
 test("keeps one downstream connection when an HTTP client cancels", async () => {
   const downstream = new FakeDownstream()
+  downstream.recycleCount = 0
+  downstream.recycle = async () => {
+    downstream.recycleCount += 1
+  }
   let releaseFirstCall
   const firstCallGate = new Promise(resolve => {
     releaseFirstCall = resolve
@@ -292,6 +342,7 @@ test("keeps one downstream connection when an HTTP client cancels", async () => 
     const result = await secondCall
     assert.equal(result.content[0].text, "SecondTool")
     assert.deepEqual(calls, ["FirstTool", "SecondTool"])
+    assert.equal(downstream.recycleCount, 0)
   } finally {
     releaseFirstCall()
     await Promise.allSettled([
