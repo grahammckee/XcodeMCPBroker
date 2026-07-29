@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
 
-import { runningXcodeProcesses, startHttpBroker, ToolBroker } from "./xcode-mcp-broker.mjs"
+import { runningXcodeProcesses, startHttpBroker, ToolBroker, XcodeDownstream } from "./xcode-mcp-broker.mjs"
 
 const quietLogger = { error() {} }
 
@@ -39,6 +39,26 @@ class FakeDownstream {
   async close() {}
 }
 
+class FakeMcpClient {
+  constructor() {
+    this.listTimeouts = []
+    this.closed = false
+  }
+
+  setNotificationHandler() {}
+  async connect() {}
+
+  async listTools(_params, options) {
+    this.listTimeouts.push(options.timeout)
+    return { tools: [] }
+  }
+
+  async close() {
+    this.closed = true
+    this.onclose?.()
+  }
+}
+
 test("finds the bridge bundled with the newest running Xcode", () => {
   const processes = runningXcodeProcesses(`
   900 Fri Jul 17 09:15:00 2026 /Applications/Xcode.app/Contents/MacOS/Xcode
@@ -60,6 +80,66 @@ test("finds the bridge bundled with the newest running Xcode", () => {
       bridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
     },
   ])
+})
+
+test("gives initial discovery time to receive Xcode authorization", async () => {
+  const client = new FakeMcpClient()
+  const downstream = new XcodeDownstream({
+    command: "/fake/mcpbridge",
+    discoveryTimeout: 10,
+    maximumRequestDuration: 1_234,
+    clientFactory: () => client,
+    transportFactory: () => ({}),
+    logger: quietLogger,
+  })
+
+  await downstream.listTools()
+  await downstream.listTools()
+
+  assert.deepEqual(client.listTimeouts, [1_234, 10])
+  await downstream.close()
+})
+
+test("replaces a stale bridge once when its pinned Xcode process exits", async () => {
+  let currentPid = 100
+  const runningPids = new Set([currentPid])
+  const clients = []
+  const connectedPids = []
+  const downstream = new XcodeDownstream({
+    xcodeStartupGrace: 0,
+    xcodeMonitorInterval: 5,
+    findRunningXcode: async () => ({
+      pid: currentPid,
+      startedAt: 0,
+      bridgePath: "/fake/mcpbridge",
+    }),
+    isProcessRunning: pid => runningPids.has(pid),
+    clientFactory: () => {
+      const client = new FakeMcpClient()
+      clients.push(client)
+      return client
+    },
+    transportFactory: parameters => {
+      connectedPids.push(parameters.xcodePid)
+      return {}
+    },
+    logger: quietLogger,
+  })
+
+  await downstream.listTools()
+  runningPids.delete(currentPid)
+  currentPid = 200
+  runningPids.add(currentPid)
+
+  const deadline = Date.now() + 500
+  while (clients.length < 2 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+
+  assert.deepEqual(connectedPids, [100, 200])
+  assert.equal(clients[0].closed, true)
+  assert.equal(clients.length, 2)
+  await downstream.close()
 })
 
 test("caches the downstream tool list", async () => {
@@ -235,7 +315,7 @@ test("drops a cancelled queued call without dispatching it downstream", async ()
   assert.deepEqual(calls, ["FirstTool"])
 })
 
-test("replaces the downstream connection after a request timeout", async () => {
+test("keeps the downstream connection after a request timeout", async () => {
   const downstream = new FakeDownstream()
   downstream.recycleCount = 0
   downstream.recycle = async () => {
@@ -253,15 +333,18 @@ test("replaces the downstream connection after a request timeout", async () => {
   const timedOutCall = broker.callTool({ name: "FirstTool", arguments: {} })
   const queuedCall = broker.callTool({ name: "SecondTool", arguments: {} })
 
-  await assert.rejects(timedOutCall, /Request timed out/)
-  assert.equal(downstream.recycleCount, 1)
+  await assert.rejects(
+    timedOutCall,
+    /Retry this tool call\. Do not restart, stop, or kill the shared broker/,
+  )
+  assert.equal(downstream.recycleCount, 0)
 
   const result = await queuedCall
   assert.equal(result.content[0].text, "SecondTool")
-  assert.equal(downstream.recycleCount, 1)
+  assert.equal(downstream.recycleCount, 0)
 })
 
-test("recycles the downstream connection after tool discovery fails", async () => {
+test("keeps the downstream connection after tool discovery times out", async () => {
   const downstream = new FakeDownstream()
   const originalListTools = downstream.listTools.bind(downstream)
   let discoveryCount = 0
@@ -276,14 +359,45 @@ test("recycles the downstream connection after tool discovery fails", async () =
   }
   const broker = new ToolBroker(downstream, { logger: quietLogger })
 
-  await assert.rejects(broker.start(), /Request timed out/)
-  assert.equal(downstream.recycleCount, 1)
+  await assert.rejects(
+    broker.start(),
+    /Retry this tool call\. Do not restart, stop, or kill the shared broker/,
+  )
+  assert.equal(downstream.recycleCount, 0)
   assert.equal(broker.health().status, "degraded")
   assert.deepEqual(await broker.listTools(), { tools: [] })
 
   await broker.refreshToolCache()
   assert.equal(broker.health().status, "ok")
   assert.equal((await broker.listTools()).tools.length, 2)
+})
+
+test("recovers the downstream after a definitive connection closure", async () => {
+  const downstream = new FakeDownstream()
+  downstream.recycleCount = 0
+  downstream.recycle = async () => {
+    downstream.recycleCount += 1
+  }
+  let callCount = 0
+  downstream.callTool = async params => {
+    callCount += 1
+    if (callCount === 1) throw new McpError(ErrorCode.ConnectionClosed, "Connection closed")
+    return { content: [{ type: "text", text: params.name }] }
+  }
+  const broker = new ToolBroker(downstream, { logger: quietLogger })
+  await broker.start()
+
+  await assert.rejects(
+    broker.callTool({ name: "FirstTool", arguments: {} }),
+    /shared Xcode connection closed and is recovering.*Do not restart, stop, or kill the broker/,
+  )
+  assert.equal(downstream.recycleCount, 1)
+  assert.deepEqual(await broker.listTools(), { tools: [] })
+
+  await broker.refreshToolCache()
+  const result = await broker.callTool({ name: "SecondTool", arguments: {} })
+  assert.equal(result.content[0].text, "SecondTool")
+  assert.equal(downstream.recycleCount, 1)
 })
 
 test("keeps one downstream connection when an HTTP client cancels", async () => {

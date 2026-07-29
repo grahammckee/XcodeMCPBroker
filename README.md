@@ -21,7 +21,7 @@ The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwar
 
 The broker does not hardcode Xcode's tools. It reads `tools/list` from `mcpbridge` and refreshes the cache when the bridge reconnects or Xcode sends a `tools/list_changed` notification. New, removed, or changed tools should therefore be picked up automatically after an Xcode update without requiring a broker release. Connected MCP clients are notified when the cached tool list changes.
 
-When Xcode is running, the broker uses the `mcpbridge` bundled with that application and pins the bridge to its process ID. This keeps beta or side-by-side Xcode installations aligned even when `xcode-select` points to another version. If no Xcode process is available, the broker falls back to `xcrun mcpbridge` while it waits and retries.
+When Xcode is running, the broker uses the `mcpbridge` bundled with that application and pins the bridge to its process ID. This keeps beta or side-by-side Xcode installations aligned even when `xcode-select` points to another version. If no Xcode process is available, the broker waits without spawning a bridge. It monitors the pinned Xcode process and creates one replacement bridge when Xcode restarts.
 
 This has been tested with the latest Xcode 27 beta available at the time of testing. Future Xcode versions should remain compatible as long as `mcpbridge` continues to implement the standard MCP lifecycle and tool APIs.
 
@@ -98,7 +98,7 @@ npm run service:uninstall
 | `XCODE_MCP_BROKER_PORT` | `7341` | HTTP port |
 | `XCODE_MCP_BRIDGE_COMMAND` | automatic | Override the bridge executable; otherwise use the running Xcode's bridge, then fall back to `xcrun mcpbridge` |
 | `XCODE_MCP_ALLOWED_TOOLS` | all tools | Comma-separated tool allowlist |
-| `XCODE_MCP_DISCOVERY_TIMEOUT_MS` | `10000` | Timeout for Xcode tool discovery before replacing an unresponsive bridge |
+| `XCODE_MCP_DISCOVERY_TIMEOUT_MS` | `10000` | Timeout for later Xcode tool-list refreshes; initial discovery waits up to the maximum request duration for authorization |
 | `XCODE_MCP_REQUEST_TIMEOUT_MS` | `45000` | Downstream no-progress timeout; progress notifications reset it |
 | `XCODE_MCP_MAX_TOTAL_TIMEOUT_MS` | `1800000` | Maximum total duration of a downstream request |
 | `XCODE_MCP_SESSION_IDLE_TIMEOUT_MS` | `300000` | Idle upstream session timeout |
@@ -124,7 +124,7 @@ Issues and pull requests are welcome. For code changes:
 
 Downstream calls are intentionally serialized. Changes to concurrency, cancellation, or retry behavior should account for Xcode operations whose outcome may be uncertain after a connection failure.
 
-Cancelling an upstream request prevents it from starting if it is still queued. Once a call has been dispatched, the broker lets it finish on the shared bridge so one client cannot interrupt other clients or trigger another Xcode authorization request. A timeout reported by the broker's own downstream connection is different: the timed-out operation is not retried, but the unresponsive bridge is replaced before later work proceeds.
+Cancelling an upstream request prevents it from starting if it is still queued. Once a call has been dispatched, the broker lets it finish on the shared bridge so one client cannot interrupt other clients or trigger another Xcode authorization request. A timed-out operation is not automatically retried, and the shared bridge is retained so a slow Xcode response does not cause another authorization request. The caller is told to retry without restarting the broker. The broker replaces the bridge only after a definitive connection closure.
 
 ## License
 
