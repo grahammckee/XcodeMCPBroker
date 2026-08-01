@@ -96,7 +96,7 @@ npm run service:uninstall
 |---|---:|---|
 | `XCODE_MCP_BROKER_HOST` | `127.0.0.1` | HTTP bind address |
 | `XCODE_MCP_BROKER_PORT` | `7341` | HTTP port |
-| `XCODE_MCP_BRIDGE_COMMAND` | automatic | Override the bridge executable; otherwise use the running Xcode's bridge, then fall back to `xcrun mcpbridge` |
+| `XCODE_MCP_BRIDGE_COMMAND` | automatic | Override the bridge executable; otherwise wait for and use a running Xcode's bridge |
 | `XCODE_MCP_ALLOWED_TOOLS` | all tools | Comma-separated tool allowlist |
 | `XCODE_MCP_DISCOVERY_TIMEOUT_MS` | `10000` | Timeout for later Xcode tool-list refreshes; initial discovery waits up to the maximum request duration for authorization |
 | `XCODE_MCP_REQUEST_TIMEOUT_MS` | `45000` | Downstream no-progress timeout; progress notifications reset it |
