@@ -27,10 +27,30 @@ const defaultRequestTimeout = 45 * 1000
 const defaultDiscoveryTimeout = 10 * 1000
 const defaultMaximumRequestDuration = 30 * 60 * 1000
 const defaultXcodeStartupGrace = 5 * 1000
+const defaultXcodeMonitorInterval = 1 * 1000
 const execFileAsync = promisify(execFile)
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function retryableError(error) {
+  if (!(error instanceof McpError)) return error
+  if (error.code === ErrorCode.RequestTimeout) {
+    return new McpError(
+      error.code,
+      "Xcode did not respond in time. Retry this tool call. Do not restart, stop, or kill the shared broker; other agents may be using it.",
+      error.data,
+    )
+  }
+  if (error.code === ErrorCode.ConnectionClosed) {
+    return new McpError(
+      error.code,
+      "The shared Xcode connection closed and is recovering. Retry shortly. Do not restart, stop, or kill the broker.",
+      error.data,
+    )
+  }
+  return error
 }
 
 export function runningXcodeProcesses(processList) {
@@ -68,6 +88,15 @@ async function runningXcodeBridge() {
     }
   }
   return undefined
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === "EPERM"
+  }
 }
 
 export class SerialExecutor {
@@ -108,6 +137,9 @@ export class XcodeDownstream {
   #hasAttemptedConnection = false
   #closed = false
   #recycling = null
+  #hasReceivedToolList = false
+  #xcodePid = null
+  #xcodeMonitorTimer = null
 
   constructor({
     command = process.env.XCODE_MCP_BRIDGE_COMMAND,
@@ -116,6 +148,11 @@ export class XcodeDownstream {
     discoveryTimeout = Number(process.env.XCODE_MCP_DISCOVERY_TIMEOUT_MS ?? defaultDiscoveryTimeout),
     maximumRequestDuration = Number(process.env.XCODE_MCP_MAX_TOTAL_TIMEOUT_MS ?? defaultMaximumRequestDuration),
     xcodeStartupGrace = Number(process.env.XCODE_MCP_XCODE_STARTUP_GRACE_MS ?? defaultXcodeStartupGrace),
+    xcodeMonitorInterval = defaultXcodeMonitorInterval,
+    findRunningXcode = runningXcodeBridge,
+    isProcessRunning = processExists,
+    clientFactory = () => new Client({ name: "xcode-mcp-broker", version: "1.0.0" }),
+    transportFactory = parameters => new StdioClientTransport(parameters),
     logger = console,
   } = {}) {
     this.command = command
@@ -124,6 +161,11 @@ export class XcodeDownstream {
     this.discoveryTimeout = discoveryTimeout
     this.maximumRequestDuration = maximumRequestDuration
     this.xcodeStartupGrace = xcodeStartupGrace
+    this.xcodeMonitorInterval = xcodeMonitorInterval
+    this.findRunningXcode = findRunningXcode
+    this.isProcessRunning = isProcessRunning
+    this.clientFactory = clientFactory
+    this.transportFactory = transportFactory
     this.logger = logger
     this.onReconnected = undefined
     this.onDisconnected = undefined
@@ -135,6 +177,11 @@ export class XcodeDownstream {
   }
 
   async connect() {
+    if (this.#recycling) return this.#recycling
+    return this.#ensureConnected()
+  }
+
+  async #ensureConnected() {
     if (this.#client) return
     if (this.#connecting) return this.#connecting
     if (this.#closed) throw new Error("Xcode downstream is closed")
@@ -159,8 +206,8 @@ export class XcodeDownstream {
 
   async #connectOnce(isReconnect) {
     const serverParameters = await this.#serverParameters()
-    const client = new Client({ name: "xcode-mcp-broker", version: "1.0.0" })
-    const transport = new StdioClientTransport(serverParameters)
+    const client = this.clientFactory()
+    const transport = this.transportFactory(serverParameters)
 
     client.onerror = error => this.logger.error(`[broker] downstream error: ${errorMessage(error)}`)
     client.onclose = () => this.#handleClose(client)
@@ -181,6 +228,9 @@ export class XcodeDownstream {
     }
 
     this.#client = client
+    this.#hasReceivedToolList = false
+    this.#xcodePid = serverParameters.xcodePid ?? null
+    this.#startXcodeMonitor()
     this.#reconnectDelay = 250
     const xcodeTarget = serverParameters.xcodePid ? ` for Xcode PID ${serverParameters.xcodePid}` : ""
     this.logger.error(`[broker] connected to ${serverParameters.command} ${(serverParameters.args ?? []).join(" ")}${xcodeTarget}`)
@@ -195,27 +245,53 @@ export class XcodeDownstream {
       }
     }
 
-    const runningXcode = await runningXcodeBridge()
-    if (runningXcode) {
-      const startupDelay = runningXcode.startedAt + this.xcodeStartupGrace - Date.now()
-      if (startupDelay > 0) await new Promise(resolve => setTimeout(resolve, startupDelay))
-      return {
-        command: runningXcode.bridgePath,
-        args: [],
-        env: {
-          ...getDefaultEnvironment(),
-          MCP_XCODE_PID: String(runningXcode.pid),
-        },
-        xcodePid: runningXcode.pid,
+    while (!this.#closed) {
+      const runningXcode = await this.findRunningXcode()
+      if (runningXcode) {
+        const startupDelay = runningXcode.startedAt + this.xcodeStartupGrace - Date.now()
+        if (startupDelay > 0) await new Promise(resolve => setTimeout(resolve, startupDelay))
+        return {
+          command: runningXcode.bridgePath,
+          args: [],
+          env: {
+            ...getDefaultEnvironment(),
+            MCP_XCODE_PID: String(runningXcode.pid),
+          },
+          xcodePid: runningXcode.pid,
+        }
       }
+      await new Promise(resolve => setTimeout(resolve, this.xcodeMonitorInterval))
     }
+    throw new Error("Xcode downstream closed while waiting for Xcode")
+  }
 
-    return { command: "/usr/bin/xcrun", args: ["mcpbridge"] }
+  #startXcodeMonitor() {
+    if (this.#xcodePid === null || this.#xcodeMonitorTimer) return
+    this.#xcodeMonitorTimer = setInterval(() => {
+      if (this.#closed || this.#recycling || this.#xcodePid === null) return
+      if (this.isProcessRunning(this.#xcodePid)) return
+
+      const exitedPid = this.#xcodePid
+      clearInterval(this.#xcodeMonitorTimer)
+      this.#xcodeMonitorTimer = null
+      this.logger.error(`[broker] Xcode PID ${exitedPid} exited; reconnecting to the next Xcode process`)
+      void this.recycle().catch(error => {
+        if (!this.#closed) this.logger.error(`[broker] failed to reconnect after Xcode exited: ${errorMessage(error)}`)
+      })
+    }, this.xcodeMonitorInterval)
+    this.#xcodeMonitorTimer.unref()
+  }
+
+  #stopXcodeMonitor() {
+    if (this.#xcodeMonitorTimer) clearInterval(this.#xcodeMonitorTimer)
+    this.#xcodeMonitorTimer = null
+    this.#xcodePid = null
   }
 
   #handleClose(client) {
     if (this.#client !== client) return
     this.#client = null
+    this.#stopXcodeMonitor()
     this.onDisconnected?.()
     if (this.#closed) return
     this.logger.error("[broker] downstream bridge closed; reconnecting")
@@ -238,7 +314,10 @@ export class XcodeDownstream {
 
   async listTools(params) {
     await this.connect()
-    return this.#client.listTools(params, { timeout: this.discoveryTimeout })
+    const timeout = this.#hasReceivedToolList ? this.discoveryTimeout : this.maximumRequestDuration
+    const result = await this.#client.listTools(params, { timeout })
+    this.#hasReceivedToolList = true
+    return result
   }
 
   async callTool(params, options = {}) {
@@ -257,10 +336,11 @@ export class XcodeDownstream {
 
     const client = this.#client
     this.#client = null
+    this.#stopXcodeMonitor()
     this.onDisconnected?.()
     this.#recycling = (async () => {
       await client?.close().catch(() => undefined)
-      await this.connect()
+      await this.#ensureConnected()
     })()
     try {
       await this.#recycling
@@ -271,6 +351,7 @@ export class XcodeDownstream {
 
   async close() {
     this.#closed = true
+    this.#stopXcodeMonitor()
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer)
     this.#reconnectTimer = null
     await this.#connecting?.catch(() => undefined)
@@ -314,12 +395,17 @@ export class ToolBroker {
     if (error) this.#lastFailure = errorMessage(error)
   }
 
-  async #recycleAfterFailure(error, context) {
+  async #recoverAfterFailure(error, context) {
     this.#markNotReady(error)
+    if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
+      this.logger.error(`[broker] ${context} timed out; keeping the shared downstream connection`)
+      return
+    }
+    if (!(error instanceof McpError) || error.code !== ErrorCode.ConnectionClosed) return
     if (typeof this.downstream.recycle !== "function") return
-    this.logger.error(`[broker] ${context} failed; recycling downstream: ${errorMessage(error)}`)
+    this.logger.error(`[broker] ${context} lost its connection; recovering the shared downstream`)
     await this.downstream.recycle().catch(recycleError => {
-      this.logger.error(`[broker] failed to recycle downstream: ${errorMessage(recycleError)}`)
+      this.logger.error(`[broker] failed to recover downstream: ${errorMessage(recycleError)}`)
     })
   }
 
@@ -403,8 +489,8 @@ export class ToolBroker {
         this.#refreshRetryTimer = null
         this.logger.error(`[broker] cached ${advertisedTools.size} Xcode tools`)
       } catch (error) {
-        await this.#recycleAfterFailure(error, "tool discovery")
-        throw error
+        await this.#recoverAfterFailure(error, "tool discovery")
+        throw retryableError(error)
       } finally {
         this.#activeTool = null
         this.#activeSince = null
@@ -438,10 +524,12 @@ export class ToolBroker {
         try {
           return await this.downstream.callTool(params, downstreamOptions)
         } catch (error) {
-          const connectionUncertain = error instanceof McpError
-            && (error.code === ErrorCode.RequestTimeout || error.code === ErrorCode.ConnectionClosed)
-          if (connectionUncertain) await this.#recycleAfterFailure(error, `Xcode tool ${params.name}`)
-          throw error
+          if (error instanceof McpError && error.code === ErrorCode.ConnectionClosed) {
+            await this.#recoverAfterFailure(error, `Xcode tool ${params.name}`)
+          } else if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
+            this.logger.error(`[broker] Xcode tool ${params.name} timed out; keeping the shared downstream connection`)
+          }
+          throw retryableError(error)
         } finally {
           this.#activeTool = null
           this.#activeSince = null
