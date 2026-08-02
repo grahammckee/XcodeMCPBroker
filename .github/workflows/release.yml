@@ -201,7 +201,11 @@ jobs:
           security unlock-keychain -p "$APPLE_SIGNING_KEYCHAIN_PASSWORD" "$KEYCHAIN"
           existing_keychains=()
           while IFS= read -r keychain; do
-            existing_keychains+=("${keychain//\"/}")
+            keychain="${keychain#"${keychain%%[![:space:]]*}"}"
+            keychain="${keychain%"${keychain##*[![:space:]]}"}"
+            keychain="${keychain#\"}"
+            keychain="${keychain%\"}"
+            [[ -n "$keychain" ]] && existing_keychains+=("$keychain")
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "$KEYCHAIN" "${existing_keychains[@]}"
           security default-keychain -d user -s "$KEYCHAIN"
