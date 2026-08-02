@@ -24,14 +24,16 @@ The copyright command keeps 2026 as the first publication year and extends the n
 
 When a version-changing pull request is squash-merged into `main`, `.github/workflows/release.yml`:
 
-1. Builds native arm64 and x86_64 Node single-executable applications.
-2. Combines them into a universal macOS executable.
-3. Developer ID signs the executable with hardened runtime.
+1. Builds an arm64 Node single-executable application and an Intel runtime containing Node plus the bundled broker.
+2. Creates an architecture-aware launcher so one package runs natively on Apple Silicon and Intel Macs.
+3. Developer ID signs both packaged runtimes with hardened runtime.
 4. Builds a signed, current-user-home installer package.
 5. Notarizes and staples the installer.
 6. Generates a source archive, CycloneDX SBOM, and SHA-256 checksums.
 7. Creates keyless GitHub provenance and SBOM attestations.
 8. Creates an annotated `v<version>` tag and generated GitHub release.
+
+Node SEA does not support macOS x86_64. The Intel package path therefore ships the signed Node runtime, its license, and the same bundled broker used by the arm64 SEA. Both paths are built and exercised natively before release.
 
 A `release:none` merge runs the release-state check but creates no tag or release. Published versions are never rewritten. The `v*` tag ruleset prevents tag updates and deletion.
 
@@ -87,5 +89,7 @@ npm run build:sea
 codesign --force --sign - dist/xcode-mcp-broker
 npm run build:package
 ```
+
+This local path creates a package for the current arm64 standalone executable. The release workflow adds and verifies the Intel runtime before creating the universal package.
 
 Unsigned packages must not be attached to public releases.
