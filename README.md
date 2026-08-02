@@ -2,7 +2,9 @@
 
 A small localhost broker that lets multiple MCP clients share one persistent `xcrun mcpbridge` connection to Xcode.
 
-[![Download latest macOS installer](https://img.shields.io/badge/Download-Latest_macOS_Installer-147EFB?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/grahammckee/XcodeMCPBroker/releases/latest/download/XcodeMCPBroker-macos-universal.pkg)
+<a href="https://github.com/grahammckee/XcodeMCPBroker/releases/latest/download/XcodeMCPBroker-macos-universal.pkg">
+  <img src="https://img.shields.io/badge/Download-Latest_macOS_Installer-147EFB?style=for-the-badge&amp;logo=apple&amp;logoColor=white" alt="Download latest macOS installer" height="48">
+</a>
 
 With the broker, Xcode authorization normally happens once per Xcode launch. After allowing the broker connection, agents can delegate work to subagents, custom tools, and external scripts that reuse it instead of starting another bridge and requesting access again.
 
