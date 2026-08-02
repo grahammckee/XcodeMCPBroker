@@ -69,10 +69,11 @@ Each release contains:
 Verify downloaded files:
 
 ```sh
+VERSION="<release-version>"
 shasum -a 256 -c SHA256SUMS
-gh attestation verify XcodeMCPBroker-1.1.0-macos-universal.pkg --repo grahammckee/XcodeMCPBroker
-pkgutil --check-signature XcodeMCPBroker-1.1.0-macos-universal.pkg
-spctl --assess --type install --verbose=4 XcodeMCPBroker-1.1.0-macos-universal.pkg
+gh attestation verify "XcodeMCPBroker-${VERSION}-macos-universal.pkg" --repo grahammckee/XcodeMCPBroker
+pkgutil --check-signature "XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+spctl --assess --type install --verbose=4 "XcodeMCPBroker-${VERSION}-macos-universal.pkg"
 ```
 
 ## Local Packaging
