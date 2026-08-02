@@ -9,7 +9,7 @@ import { promisify } from "node:util"
 const execFileAsync = promisify(execFile)
 const label = "com.gmicc.opencode-xcode-mcp-broker"
 const domain = `gui/${process.getuid()}`
-const brokerDirectory = path.dirname(fileURLToPath(import.meta.url))
+const projectDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const launchAgentsDirectory = path.join(homedir(), "Library", "LaunchAgents")
 const logsDirectory = path.join(homedir(), "Library", "Logs")
 const plistPath = path.join(launchAgentsDirectory, `${label}.plist`)
@@ -92,10 +92,10 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <key>ProgramArguments</key>
     <array>
         <string>${escapeXML(nodeExecutable)}</string>
-        <string>${escapeXML(path.join(brokerDirectory, "xcode-mcp-broker.mjs"))}</string>
+        <string>${escapeXML(path.join(projectDirectory, "src", "cli.mjs"))}</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${escapeXML(brokerDirectory)}</string>
+    <string>${escapeXML(projectDirectory)}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
 
-import { runningXcodeProcesses, startHttpBroker, ToolBroker, XcodeDownstream } from "./xcode-mcp-broker.mjs"
+import { runningXcodeProcesses, startHttpBroker, ToolBroker, XcodeDownstream } from "../src/broker.mjs"
 
 const quietLogger = { error() {} }
 

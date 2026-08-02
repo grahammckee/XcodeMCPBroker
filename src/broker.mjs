@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import { access } from "node:fs/promises"
 import path from "node:path"
-import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
@@ -20,6 +19,8 @@ import {
   McpError,
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js"
+
+import { brokerVersion } from "./version.mjs"
 
 const defaultHost = "127.0.0.1"
 const defaultPort = 7341
@@ -151,7 +152,7 @@ export class XcodeDownstream {
     xcodeMonitorInterval = defaultXcodeMonitorInterval,
     findRunningXcode = runningXcodeBridge,
     isProcessRunning = processExists,
-    clientFactory = () => new Client({ name: "xcode-mcp-broker", version: "1.0.0" }),
+    clientFactory = () => new Client({ name: "xcode-mcp-broker", version: brokerVersion }),
     transportFactory = parameters => new StdioClientTransport(parameters),
     logger = console,
   } = {}) {
@@ -577,7 +578,7 @@ export class ToolBroker {
 
 function createUpstreamServer(broker, logger) {
   const server = new Server(
-    { name: "xcode-mcp-broker", version: "1.0.0" },
+    { name: "xcode-mcp-broker", version: brokerVersion },
     { capabilities: { tools: { listChanged: true } } },
   )
 
@@ -758,12 +759,4 @@ export async function main() {
   }
   process.on("SIGINT", () => void shutdown("SIGINT"))
   process.on("SIGTERM", () => void shutdown("SIGTERM"))
-}
-
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
-if (isMain) {
-  main().catch(error => {
-    console.error(`[broker] startup failed: ${errorMessage(error)}`)
-    process.exit(1)
-  })
 }

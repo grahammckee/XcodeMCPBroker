@@ -1,0 +1,33 @@
+name: Release Intent
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+
+jobs:
+  release-intent:
+    name: Release intent
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release label and version
+        run: node scripts/check-release-intent.mjs
+
+      - name: Verify copyright year
+        run: node scripts/update-copyright.mjs --check
