@@ -2,6 +2,10 @@
 
 A small localhost broker that lets multiple MCP clients share one persistent `xcrun mcpbridge` connection to Xcode.
 
+<a href="https://github.com/grahammckee/XcodeMCPBroker/releases/latest/download/XcodeMCPBroker-macos-universal.pkg">
+  <img src="https://img.shields.io/badge/Download-Latest_macOS_Installer-147EFB?style=for-the-badge&amp;logo=apple&amp;logoColor=white" alt="Download latest macOS installer" height="48">
+</a>
+
 With the broker, Xcode authorization normally happens once per Xcode launch. After allowing the broker connection, agents can delegate work to subagents, custom tools, and external scripts that reuse it instead of starting another bridge and requesting access again.
 
 ```text
@@ -31,7 +35,7 @@ If `XCODE_MCP_ALLOWED_TOOLS` is set, newly added tools remain hidden until they 
 
 ### macOS installer
 
-Download the universal macOS package from the [latest release](https://github.com/grahammckee/XcodeMCPBroker/releases/latest) and open it with Installer. The Developer ID signed and notarized package contains its own runtime, so Node.js is not required.
+Download the [latest universal macOS installer](https://github.com/grahammckee/XcodeMCPBroker/releases/latest/download/XcodeMCPBroker-macos-universal.pkg) and open it with Installer. The Developer ID signed and notarized package contains its own runtime, so Node.js is not required.
 
 The package installs for the current user:
 

@@ -244,25 +244,25 @@ jobs:
           test "$(arch -x86_64 dist/runtime/x86_64/node dist/runtime/xcode-mcp-broker.bundle.mjs --version)" = "$VERSION"
 
       - name: Build signed installer
-        run: node scripts/package-macos.mjs dist/runtime "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+        run: node scripts/package-macos.mjs dist/runtime "dist/XcodeMCPBroker-macos-universal.pkg"
 
       - name: Notarize and staple installer
         run: |
           NOTARY_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
           printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 -D > "$NOTARY_KEY"
-          xcrun notarytool submit "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg" --key "$NOTARY_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun notarytool submit "dist/XcodeMCPBroker-macos-universal.pkg" --key "$NOTARY_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
           rm -f "$NOTARY_KEY"
-          xcrun stapler staple "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
-          xcrun stapler validate "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
-          pkgutil --check-signature "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
-          spctl --assess --type install --verbose=4 "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+          xcrun stapler staple "dist/XcodeMCPBroker-macos-universal.pkg"
+          xcrun stapler validate "dist/XcodeMCPBroker-macos-universal.pkg"
+          pkgutil --check-signature "dist/XcodeMCPBroker-macos-universal.pkg"
+          spctl --assess --type install --verbose=4 "dist/XcodeMCPBroker-macos-universal.pkg"
 
       - name: Generate source archive, SBOM, and checksums
         run: |
           git archive --format=tar.gz --prefix="XcodeMCPBroker-${VERSION}/" --output="dist/XcodeMCPBroker-${VERSION}-source.tar.gz" "$GITHUB_SHA"
           npm sbom --omit=dev --sbom-format=cyclonedx > "dist/XcodeMCPBroker-${VERSION}.cdx.json"
           cd dist
-          shasum -a 256 "XcodeMCPBroker-${VERSION}-macos-universal.pkg" "XcodeMCPBroker-${VERSION}-source.tar.gz" "XcodeMCPBroker-${VERSION}.cdx.json" > SHA256SUMS
+          shasum -a 256 "XcodeMCPBroker-macos-universal.pkg" "XcodeMCPBroker-${VERSION}-source.tar.gz" "XcodeMCPBroker-${VERSION}.cdx.json" > SHA256SUMS
 
       - name: Attest release provenance
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
@@ -272,7 +272,7 @@ jobs:
       - name: Attest installer SBOM
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
-          subject-path: dist/XcodeMCPBroker-${{ needs.prepare.outputs.version }}-macos-universal.pkg
+          subject-path: dist/XcodeMCPBroker-macos-universal.pkg
           sbom-path: dist/XcodeMCPBroker-${{ needs.prepare.outputs.version }}.cdx.json
 
       - name: Create annotated release tag
@@ -287,7 +287,7 @@ jobs:
       - name: Create GitHub release
         run: |
           ASSETS=(
-            "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+            "dist/XcodeMCPBroker-macos-universal.pkg"
             "dist/XcodeMCPBroker-${VERSION}-source.tar.gz"
             "dist/XcodeMCPBroker-${VERSION}.cdx.json"
             dist/SHA256SUMS
