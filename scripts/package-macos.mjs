@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process"
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
-const binary = path.resolve(process.argv[2] ?? "dist/xcode-mcp-broker")
+const runtimeInput = path.resolve(process.argv[2] ?? "dist/xcode-mcp-broker")
 const output = path.resolve(process.argv[3] ?? "dist/XcodeMCPBroker.pkg")
 const installerIdentity = process.env.APPLE_INSTALLER_IDENTITY
 const keychain = process.env.APPLE_SIGNING_KEYCHAIN
@@ -23,8 +23,54 @@ try {
   const launchAgentsDirectory = path.join(payload, "Library", "LaunchAgents")
   await mkdir(applicationDirectory, { recursive: true })
   await mkdir(launchAgentsDirectory, { recursive: true })
-  await copyFile(binary, path.join(applicationDirectory, "xcode-mcp-broker"))
-  await chmod(path.join(applicationDirectory, "xcode-mcp-broker"), 0o755)
+
+  const runtimeDirectory = path.join(applicationDirectory, "runtime")
+  if ((await stat(runtimeInput)).isDirectory()) {
+    await cp(runtimeInput, runtimeDirectory, { recursive: true })
+  } else {
+    const armDirectory = path.join(runtimeDirectory, "arm64")
+    await mkdir(armDirectory, { recursive: true })
+    await copyFile(runtimeInput, path.join(armDirectory, "xcode-mcp-broker"))
+  }
+
+  const armExecutable = path.join(runtimeDirectory, "arm64", "xcode-mcp-broker")
+  const intelNode = path.join(runtimeDirectory, "x86_64", "node")
+  const intelBundle = path.join(runtimeDirectory, "xcode-mcp-broker.bundle.mjs")
+  const nodeLicense = path.join(runtimeDirectory, "LICENSE.node")
+  const architectures = []
+  if (await access(armExecutable).then(() => true, () => false)) {
+    await chmod(armExecutable, 0o755)
+    architectures.push("arm64")
+  }
+  const hasIntelNode = await access(intelNode).then(() => true, () => false)
+  const hasIntelBundle = await access(intelBundle).then(() => true, () => false)
+  const hasNodeLicense = await access(nodeLicense).then(() => true, () => false)
+  if (hasIntelNode !== hasIntelBundle) throw new Error("Intel runtime requires both node and xcode-mcp-broker.bundle.mjs")
+  if (hasIntelNode && !hasNodeLicense) throw new Error("Intel runtime requires the Node.js license")
+  if (hasIntelNode) {
+    await chmod(intelNode, 0o755)
+    architectures.push("x86_64")
+  }
+  if (architectures.length === 0) throw new Error("Runtime input does not contain a supported macOS runtime")
+
+  const launcher = `#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$(uname -m)" in
+  arm64)
+    exec "$ROOT/runtime/arm64/xcode-mcp-broker" "$@"
+    ;;
+  x86_64)
+    exec "$ROOT/runtime/x86_64/node" "$ROOT/runtime/xcode-mcp-broker.bundle.mjs" "$@"
+    ;;
+  *)
+    echo "Unsupported Mac architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+`
+  const launcherPath = path.join(applicationDirectory, "xcode-mcp-broker")
+  await writeFile(launcherPath, launcher, { mode: 0o755 })
 
   const command = 'exec "$HOME/Library/Application Support/XcodeMCPBroker/xcode-mcp-broker" >> "$HOME/Library/Logs/xcode-mcp-broker.log" 2>&1'
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -62,7 +108,7 @@ try {
   const distribution = `<?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>Xcode MCP Broker ${packageJson.version}</title>
-    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <options customize="never" require-scripts="false" hostArchitectures="${architectures.join(",")}"/>
     <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
     <choices-outline>
         <line choice="default"/>

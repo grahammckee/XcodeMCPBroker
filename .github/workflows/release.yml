@@ -36,7 +36,7 @@ jobs:
         run: node scripts/release-state.mjs
 
   build:
-    name: Build ${{ matrix.arch }} executable
+    name: Build ${{ matrix.arch }} runtime
     needs: prepare
     if: needs.prepare.outputs.release-required == 'true'
     strategy:
@@ -67,19 +67,49 @@ jobs:
       - name: Verify source
         run: npm audit --audit-level=moderate && npm test
 
-      - name: Build standalone executable
-        run: npm run build:bundle && npm run build:sea
-
-      - name: Ad-hoc sign executable for verification
-        run: codesign --force --sign - dist/xcode-mcp-broker
-
-      - name: Verify executable
+      - name: Build packaged runtime
         env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          npm run build:bundle
+          mkdir -p "dist/runtime/$ARCH"
+          if test "$ARCH" = arm64; then
+            npm run build:sea
+            cp dist/xcode-mcp-broker "dist/runtime/$ARCH/xcode-mcp-broker"
+          else
+            NODE_ROOT=$(dirname "$(dirname "$(command -v node)")")
+            cp "$(command -v node)" "dist/runtime/$ARCH/node"
+            cp "$NODE_ROOT/LICENSE" dist/runtime/LICENSE.node
+            cp dist/xcode-mcp-broker.bundle.mjs dist/runtime/xcode-mcp-broker.bundle.mjs
+          fi
+
+      - name: Ad-hoc sign runtime for verification
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if test "$ARCH" = arm64; then
+            codesign --force --sign - "dist/runtime/$ARCH/xcode-mcp-broker"
+          else
+            codesign --force --sign - "dist/runtime/$ARCH/node"
+          fi
+
+      - name: Verify runtime
+        env:
+          ARCH: ${{ matrix.arch }}
           EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          test "$(dist/xcode-mcp-broker --version)" = "$EXPECTED_VERSION"
-          file dist/xcode-mcp-broker
-          XCODE_MCP_BROKER_PORT=17341 dist/xcode-mcp-broker > "$RUNNER_TEMP/broker.log" 2>&1 &
+          if test "$ARCH" = arm64; then
+            RUNTIME=("dist/runtime/$ARCH/xcode-mcp-broker")
+          else
+            RUNTIME=("dist/runtime/$ARCH/node" dist/runtime/xcode-mcp-broker.bundle.mjs)
+          fi
+          ACTUAL_VERSION=$("${RUNTIME[@]}" --version)
+          if test "$ACTUAL_VERSION" != "$EXPECTED_VERSION"; then
+            echo "Expected version $EXPECTED_VERSION, got: $ACTUAL_VERSION" >&2
+            exit 1
+          fi
+          file "${RUNTIME[0]}"
+          XCODE_MCP_BROKER_PORT=17341 "${RUNTIME[@]}" > "$RUNNER_TEMP/broker.log" 2>&1 &
           BROKER_PID=$!
           trap 'kill "$BROKER_PID" 2>/dev/null || true' EXIT
           for attempt in {1..20}; do
@@ -92,11 +122,11 @@ jobs:
           cat "$RUNNER_TEMP/broker.log"
           exit 1
 
-      - name: Upload executable
+      - name: Upload runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: xcode-mcp-broker-${{ matrix.arch }}
-          path: dist/xcode-mcp-broker
+          name: xcode-mcp-broker-runtime-${{ matrix.arch }}
+          path: dist/runtime
           if-no-files-found: error
           retention-days: 7
 
@@ -142,17 +172,17 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Download arm64 executable
+      - name: Download arm64 runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcode-mcp-broker-arm64
-          path: dist/arm64
+          name: xcode-mcp-broker-runtime-arm64
+          path: dist/runtime
 
-      - name: Download Intel executable
+      - name: Download Intel runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcode-mcp-broker-x86_64
-          path: dist/x86_64
+          name: xcode-mcp-broker-runtime-x86_64
+          path: dist/runtime
 
       - name: Validate signing configuration
         run: |
@@ -178,17 +208,18 @@ jobs:
           echo "APPLE_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
           rm -f "$CERTIFICATE"
 
-      - name: Create and sign universal executable
+      - name: Sign packaged runtimes
         run: |
-          chmod +x dist/arm64/xcode-mcp-broker dist/x86_64/xcode-mcp-broker
-          lipo -create dist/arm64/xcode-mcp-broker dist/x86_64/xcode-mcp-broker -output dist/xcode-mcp-broker
-          lipo -verify_arch arm64 x86_64 dist/xcode-mcp-broker
-          codesign --force --sign "$APPLE_APPLICATION_IDENTITY" --keychain "$APPLE_SIGNING_KEYCHAIN" --options runtime --timestamp --entitlements packaging/node-entitlements.plist dist/xcode-mcp-broker
-          codesign --verify --strict --verbose=2 dist/xcode-mcp-broker
-          test "$(dist/xcode-mcp-broker --version)" = "$VERSION"
+          chmod +x dist/runtime/arm64/xcode-mcp-broker dist/runtime/x86_64/node
+          codesign --force --sign "$APPLE_APPLICATION_IDENTITY" --keychain "$APPLE_SIGNING_KEYCHAIN" --options runtime --timestamp --entitlements packaging/node-entitlements.plist dist/runtime/arm64/xcode-mcp-broker
+          codesign --force --sign "$APPLE_APPLICATION_IDENTITY" --keychain "$APPLE_SIGNING_KEYCHAIN" --options runtime --timestamp --entitlements packaging/node-entitlements.plist dist/runtime/x86_64/node
+          codesign --verify --strict --verbose=2 dist/runtime/arm64/xcode-mcp-broker
+          codesign --verify --strict --verbose=2 dist/runtime/x86_64/node
+          test "$(dist/runtime/arm64/xcode-mcp-broker --version)" = "$VERSION"
+          test "$(arch -x86_64 dist/runtime/x86_64/node dist/runtime/xcode-mcp-broker.bundle.mjs --version)" = "$VERSION"
 
       - name: Build signed installer
-        run: node scripts/package-macos.mjs dist/xcode-mcp-broker "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+        run: node scripts/package-macos.mjs dist/runtime "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
 
       - name: Notarize and staple installer
         run: |
