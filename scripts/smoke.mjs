@@ -1,9 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 
+import { brokerVersion } from "../src/version.mjs"
+
 const url = new URL(process.env.XCODE_MCP_BROKER_URL ?? "http://127.0.0.1:7341/mcp")
 const timeout = Number(process.env.XCODE_MCP_SMOKE_TIMEOUT_MS ?? 60_000)
-const client = new Client({ name: "xcode-mcp-broker-smoke", version: "1.0.0" })
+const client = new Client({ name: "xcode-mcp-broker-smoke", version: brokerVersion })
 const transport = new StreamableHTTPClientTransport(url)
 
 try {

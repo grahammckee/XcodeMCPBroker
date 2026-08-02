@@ -15,7 +15,7 @@ The broker exposes a Streamable HTTP endpoint, serializes calls to Xcode, forwar
 ## Requirements
 
 - macOS with an Xcode version that provides `xcrun mcpbridge`
-- Node.js 18 or later
+- Node.js 20 or later for source installation and development
 
 ## Xcode compatibility
 
@@ -28,6 +28,26 @@ This has been tested with the latest Xcode 27 beta available at the time of test
 If `XCODE_MCP_ALLOWED_TOOLS` is set, newly added tools remain hidden until they are added to that allowlist. `XCODE_MCP_BRIDGE_COMMAND` can still override automatic bridge selection when needed.
 
 ## Installation
+
+### macOS installer
+
+Download the universal macOS package from the [latest release](https://github.com/grahammckee/XcodeMCPBroker/releases/latest) and open it with Installer. The Developer ID signed and notarized package contains its own runtime, so Node.js is not required.
+
+The package installs for the current user:
+
+```text
+~/Library/Application Support/XcodeMCPBroker/xcode-mcp-broker
+~/Library/LaunchAgents/com.gmicc.opencode-xcode-mcp-broker.plist
+```
+
+The LaunchAgent starts automatically at the next login. To start it immediately after installation:
+
+```sh
+launchctl bootout gui/$(id -u)/com.gmicc.opencode-xcode-mcp-broker 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.gmicc.opencode-xcode-mcp-broker.plist"
+```
+
+### Source installation
 
 Clone the repository, install dependencies, and run the tests:
 
@@ -90,6 +110,12 @@ To remove the LaunchAgent:
 npm run service:uninstall
 ```
 
+To remove a package installation while retaining its logs:
+
+```sh
+"$HOME/Library/Application Support/XcodeMCPBroker/xcode-mcp-broker" uninstall
+```
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -114,17 +140,20 @@ The broker does not provide authentication. Keep it bound to the loopback interf
 
 ## Contributing
 
-Issues and pull requests are welcome. For code changes:
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for development, testing, and release-label requirements. Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-1. Create a focused branch from the current default branch.
-2. Add or update tests for protocol, lifecycle, or concurrency behavior.
-3. Run `npm test`.
-4. If the change affects the live transport, run `npm run broker:smoke` with Xcode open.
-5. Explain the behavior change and verification performed in the pull request.
+Do not open public issues for suspected vulnerabilities. Follow the private reporting process in [SECURITY.md](SECURITY.md).
 
-Downstream calls are intentionally serialized. Changes to concurrency, cancellation, or retry behavior should account for Xcode operations whose outcome may be uncertain after a connection failure.
+### Repository layout
 
-Cancelling an upstream request prevents it from starting if it is still queued. Once a call has been dispatched, the broker lets it finish on the shared bridge so one client cannot interrupt other clients or trigger another Xcode authorization request. A timed-out operation is not automatically retried, and the shared bridge is retained so a slow Xcode response does not cause another authorization request. The caller is told to retry without restarting the broker. The broker replaces the bridge only after a definitive connection closure.
+| Path | Purpose |
+|---|---|
+| `src/` | Broker runtime and standalone executable entrypoint |
+| `test/` | Node test suites |
+| `scripts/` | Development, installation, and release commands |
+| `scripts/lib/` | Shared release-policy helpers |
+| `packaging/` | macOS signing and installer metadata |
+| `.github/` | CI, release automation, Dependabot, and contribution templates |
 
 ## License
 

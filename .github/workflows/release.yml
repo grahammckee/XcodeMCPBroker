@@ -1,0 +1,247 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 26.5.1
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release-required: ${{ steps.state.outputs.release-required }}
+      version: ${{ steps.state.outputs.version }}
+      tag: ${{ steps.state.outputs.tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine release state
+        id: state
+        run: node scripts/release-state.mjs
+
+  build:
+    name: Build ${{ matrix.arch }} executable
+    needs: prepare
+    if: needs.prepare.outputs.release-required == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify source
+        run: npm audit --audit-level=moderate && npm test
+
+      - name: Build standalone executable
+        run: npm run build:bundle && npm run build:sea
+
+      - name: Ad-hoc sign executable for verification
+        run: codesign --force --sign - dist/xcode-mcp-broker
+
+      - name: Verify executable
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          test "$(dist/xcode-mcp-broker --version)" = "$EXPECTED_VERSION"
+          file dist/xcode-mcp-broker
+          XCODE_MCP_BROKER_PORT=17341 dist/xcode-mcp-broker > "$RUNNER_TEMP/broker.log" 2>&1 &
+          BROKER_PID=$!
+          trap 'kill "$BROKER_PID" 2>/dev/null || true' EXIT
+          for attempt in {1..20}; do
+            STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:17341/healthz || true)
+            if test "$STATUS" = 200 || test "$STATUS" = 503; then
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "$RUNNER_TEMP/broker.log"
+          exit 1
+
+      - name: Upload executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcode-mcp-broker-${{ matrix.arch }}
+          path: dist/xcode-mcp-broker
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Sign, notarize, and release
+    needs:
+      - prepare
+      - build
+    if: needs.prepare.outputs.release-required == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      APPLE_APPLICATION_IDENTITY: ${{ vars.APPLE_APPLICATION_IDENTITY }}
+      APPLE_INSTALLER_IDENTITY: ${{ vars.APPLE_INSTALLER_IDENTITY }}
+      APPLE_CERTIFICATES_P12: ${{ secrets.APPLE_CERTIFICATES_P12 }}
+      APPLE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_CERTIFICATES_PASSWORD }}
+      APPLE_SIGNING_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_SIGNING_KEYCHAIN_PASSWORD }}
+      APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Download arm64 executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: xcode-mcp-broker-arm64
+          path: dist/arm64
+
+      - name: Download Intel executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: xcode-mcp-broker-x86_64
+          path: dist/x86_64
+
+      - name: Validate signing configuration
+        run: |
+          : "${APPLE_APPLICATION_IDENTITY:?Set the APPLE_APPLICATION_IDENTITY release environment variable}"
+          : "${APPLE_INSTALLER_IDENTITY:?Set the APPLE_INSTALLER_IDENTITY release environment variable}"
+          : "${APPLE_CERTIFICATES_P12:?Set the APPLE_CERTIFICATES_P12 release secret}"
+          : "${APPLE_CERTIFICATES_PASSWORD:?Set the APPLE_CERTIFICATES_PASSWORD release secret}"
+          : "${APPLE_SIGNING_KEYCHAIN_PASSWORD:?Set the APPLE_SIGNING_KEYCHAIN_PASSWORD release secret}"
+          : "${APPLE_NOTARY_KEY_P8:?Set the APPLE_NOTARY_KEY_P8 release secret}"
+          : "${APPLE_API_KEY_ID:?Set the APPLE_API_KEY_ID release secret}"
+          : "${APPLE_API_ISSUER:?Set the APPLE_API_ISSUER release secret}"
+
+      - name: Import signing certificates
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/xcode-mcp-broker-signing.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$APPLE_CERTIFICATES_P12" | base64 -D > "$CERTIFICATE"
+          security create-keychain -p "$APPLE_SIGNING_KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$APPLE_SIGNING_KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERTIFICATE" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATES_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_SIGNING_KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "APPLE_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          rm -f "$CERTIFICATE"
+
+      - name: Create and sign universal executable
+        run: |
+          chmod +x dist/arm64/xcode-mcp-broker dist/x86_64/xcode-mcp-broker
+          lipo -create dist/arm64/xcode-mcp-broker dist/x86_64/xcode-mcp-broker -output dist/xcode-mcp-broker
+          lipo -verify_arch arm64 x86_64 dist/xcode-mcp-broker
+          codesign --force --sign "$APPLE_APPLICATION_IDENTITY" --keychain "$APPLE_SIGNING_KEYCHAIN" --options runtime --timestamp --entitlements packaging/node-entitlements.plist dist/xcode-mcp-broker
+          codesign --verify --strict --verbose=2 dist/xcode-mcp-broker
+          test "$(dist/xcode-mcp-broker --version)" = "$VERSION"
+
+      - name: Build signed installer
+        run: node scripts/package-macos.mjs dist/xcode-mcp-broker "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+
+      - name: Notarize and staple installer
+        run: |
+          NOTARY_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 -D > "$NOTARY_KEY"
+          xcrun notarytool submit "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg" --key "$NOTARY_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
+          rm -f "$NOTARY_KEY"
+          xcrun stapler staple "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+          xcrun stapler validate "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+          pkgutil --check-signature "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+          spctl --assess --type install --verbose=4 "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+
+      - name: Generate source archive, SBOM, and checksums
+        run: |
+          git archive --format=tar.gz --prefix="XcodeMCPBroker-${VERSION}/" --output="dist/XcodeMCPBroker-${VERSION}-source.tar.gz" "$GITHUB_SHA"
+          npm sbom --omit=dev --sbom-format=cyclonedx > "dist/XcodeMCPBroker-${VERSION}.cdx.json"
+          cd dist
+          shasum -a 256 "XcodeMCPBroker-${VERSION}-macos-universal.pkg" "XcodeMCPBroker-${VERSION}-source.tar.gz" "XcodeMCPBroker-${VERSION}.cdx.json" > SHA256SUMS
+
+      - name: Attest release provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest installer SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: dist/XcodeMCPBroker-${{ needs.prepare.outputs.version }}-macos-universal.pkg
+          sbom-path: dist/XcodeMCPBroker-${{ needs.prepare.outputs.version }}.cdx.json
+
+      - name: Create annotated release tag
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+          else
+            TAG_OBJECT=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" -f tag="$TAG" -f message="Xcode MCP Broker $VERSION" -f object="$GITHUB_SHA" -f type=commit --jq .sha)
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$TAG_OBJECT"
+          fi
+
+      - name: Create GitHub release
+        run: |
+          ASSETS=(
+            "dist/XcodeMCPBroker-${VERSION}-macos-universal.pkg"
+            "dist/XcodeMCPBroker-${VERSION}-source.tar.gz"
+            "dist/XcodeMCPBroker-${VERSION}.cdx.json"
+            dist/SHA256SUMS
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --verify-tag --generate-notes --title "Xcode MCP Broker $VERSION"
+          fi
+
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain "$APPLE_SIGNING_KEYCHAIN" 2>/dev/null || true

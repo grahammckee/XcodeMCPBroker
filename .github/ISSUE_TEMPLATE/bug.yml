@@ -1,0 +1,70 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Remove credentials, private source code, usernames, and sensitive paths from logs. Report security-sensitive issues through the private vulnerability form instead.
+  - type: input
+    id: version
+    attributes:
+      label: Broker version
+      description: Release tag, package version, or commit SHA
+      placeholder: v1.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, Xcode version, Mac architecture, and Node version for source installs
+      placeholder: macOS 26.0, Xcode 27 beta, arm64, package installer
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Signed macOS package
+        - Source checkout and LaunchAgent
+        - Foreground source process
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable sequence that reproduces the issue.
+      placeholder: |
+        1. Start the broker...
+        2. Connect a client...
+        3. Call...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste sanitized broker or launchd logs. Do not include secrets or private source code.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and releases.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true
