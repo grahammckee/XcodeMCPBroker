@@ -39,14 +39,7 @@ A `release:none` merge runs the release-state check but creates no tag or releas
 
 ## Release Environment
 
-The `release` GitHub environment must define these variables:
-
-| Variable | Value |
-|---|---|
-| `APPLE_APPLICATION_IDENTITY` | Full Developer ID Application identity |
-| `APPLE_INSTALLER_IDENTITY` | Full Developer ID Installer identity |
-
-It must also define these secrets:
+The `release` GitHub environment must define these secrets:
 
 | Secret | Value |
 |---|---|
@@ -56,6 +49,8 @@ It must also define these secrets:
 | `APPLE_NOTARY_KEY_P8` | Base64-encoded App Store Connect API private key |
 | `APPLE_API_KEY_ID` | App Store Connect API key ID |
 | `APPLE_API_ISSUER` | App Store Connect issuer ID |
+
+The workflow discovers the exact Developer ID Application and Developer ID Installer identity names from `APPLE_CERTIFICATES_P12`. The archive must contain both certificates and their private keys.
 
 Signing credentials are used only by the protected release job after code has merged. Pull-request workflows cannot access them.
 
