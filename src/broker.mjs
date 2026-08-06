@@ -517,13 +517,13 @@ export class ToolBroker {
     if (!this.#advertisedTools.has(params.name)) {
       throw new McpError(ErrorCode.InvalidParams, `Xcode tool is not advertised or allowed: ${params.name}`)
     }
-    const { signal, ...downstreamOptions } = options
+    const { signal } = options
     return this.#serial.run(
       async () => {
         this.#activeTool = params.name
         this.#activeSince = Date.now()
         try {
-          return await this.downstream.callTool(params, downstreamOptions)
+          return await this.downstream.callTool(params, options)
         } catch (error) {
           if (error instanceof McpError && error.code === ErrorCode.ConnectionClosed) {
             await this.#recoverAfterFailure(error, `Xcode tool ${params.name}`)
