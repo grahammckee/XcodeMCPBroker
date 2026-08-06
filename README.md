@@ -84,13 +84,14 @@ Point OpenCode at the broker in `~/.config/opencode/opencode.json`:
       "type": "remote",
       "url": "http://127.0.0.1:7341/mcp",
       "oauth": false,
+      "timeout": 1860000,
       "enabled": true
     }
   }
 }
 ```
 
-Restart OpenCode after changing its configuration.
+The timeout is slightly longer than the broker's default 30-minute maximum so long-running Xcode operations can return their result or broker timeout. Restart OpenCode after changing its configuration.
 
 ## Verification
 

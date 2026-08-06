@@ -242,12 +242,8 @@ test("filters tools and rejects calls outside the allowlist", async () => {
   )
 })
 
-test("forwards progress without coupling active work to upstream cancellation", async () => {
+test("cancels active downstream work and releases the queue", async () => {
   const downstream = new FakeDownstream()
-  let releaseFirstCall
-  const firstCallGate = new Promise(resolve => {
-    releaseFirstCall = resolve
-  })
   let firstCallStarted
   const started = new Promise(resolve => {
     firstCallStarted = resolve
@@ -255,11 +251,12 @@ test("forwards progress without coupling active work to upstream cancellation", 
   const calls = []
   downstream.callTool = async (params, options) => {
     calls.push(params.name)
-    assert.equal(options.signal, undefined)
     options.onprogress?.({ progress: 1, total: 1 })
     if (params.name === "FirstTool") {
       firstCallStarted()
-      await firstCallGate
+      await new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+      })
     }
     return { content: [{ type: "text", text: params.name }] }
   }
@@ -273,16 +270,17 @@ test("forwards progress without coupling active work to upstream cancellation", 
     { signal: controller.signal, onprogress: value => progress.push(value) },
   )
   await started
+  assert.deepEqual(calls, ["FirstTool"])
+  const firstCallCancelled = assert.rejects(firstCall, /cancelled/)
   controller.abort(new Error("cancelled"))
   const secondCall = broker.callTool({ name: "SecondTool", arguments: {} })
-  await new Promise(resolve => setImmediate(resolve))
 
-  assert.deepEqual(calls, ["FirstTool"])
-  releaseFirstCall()
-  await Promise.all([firstCall, secondCall])
+  await firstCallCancelled
+  const result = await secondCall
 
   assert.deepEqual(progress, [{ progress: 1, total: 1 }])
   assert.deepEqual(calls, ["FirstTool", "SecondTool"])
+  assert.equal(result.content[0].text, "SecondTool")
 })
 
 test("drops a cancelled queued call without dispatching it downstream", async () => {
@@ -400,26 +398,24 @@ test("recovers the downstream after a definitive connection closure", async () =
   assert.equal(downstream.recycleCount, 1)
 })
 
-test("keeps one downstream connection when an HTTP client cancels", async () => {
+test("releases active HTTP work without recycling when a client cancels", async () => {
   const downstream = new FakeDownstream()
   downstream.recycleCount = 0
   downstream.recycle = async () => {
     downstream.recycleCount += 1
   }
-  let releaseFirstCall
-  const firstCallGate = new Promise(resolve => {
-    releaseFirstCall = resolve
-  })
   let firstCallStarted
   const started = new Promise(resolve => {
     firstCallStarted = resolve
   })
   const calls = []
-  downstream.callTool = async params => {
+  downstream.callTool = async (params, options) => {
     calls.push(params.name)
     if (params.name === "FirstTool") {
       firstCallStarted()
-      await firstCallGate
+      await new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+      })
     }
     return { content: [{ type: "text", text: params.name }] }
   }
@@ -449,16 +445,11 @@ test("keeps one downstream connection when an HTTP client cancels", async () => 
     const secondCall = secondClient.callTool({ name: "SecondTool", arguments: {} })
     controller.abort(new Error("cancelled"))
     await assert.rejects(cancelledCall, /cancelled/)
-    await new Promise(resolve => setImmediate(resolve))
-
-    assert.deepEqual(calls, ["FirstTool"])
-    releaseFirstCall()
     const result = await secondCall
     assert.equal(result.content[0].text, "SecondTool")
     assert.deepEqual(calls, ["FirstTool", "SecondTool"])
     assert.equal(downstream.recycleCount, 0)
   } finally {
-    releaseFirstCall()
     await Promise.allSettled([
       firstTransport.terminateSession(),
       secondTransport.terminateSession(),
